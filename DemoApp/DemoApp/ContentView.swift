@@ -10,16 +10,16 @@ import Combine
 import Camera_SwiftUI
 import AVFoundation
 
-final class CameraModel: ObservableObject {
-    private let service = CameraService()
+@Observable final class CameraModel {
+    private let service : CameraService
     
-    @Published var photo: Photo!
+    var photos: [Photo] = []
     
-    @Published var showAlertError = false
+    var showAlertError = false
     
-    @Published var isFlashOn = false
+    var isFlashOn = false
     
-    @Published var willCapturePhoto = false
+    var willCapturePhoto = false
     
     var alertError: AlertError!
     
@@ -27,12 +27,15 @@ final class CameraModel: ObservableObject {
     
     private var subscriptions = Set<AnyCancellable>()
     
-    init() {
+    init(saveToPhotoLibrary: Bool = true) {
+        service = CameraService(saveToPhotoLibrary: saveToPhotoLibrary)
         self.session = service.session
         
         service.$photo.sink { [weak self] (photo) in
             guard let pic = photo else { return }
-            self?.photo = pic
+            guard var current = self?.photos else { return }
+            current.append(pic)
+            self?.photos = current
         }
         .store(in: &self.subscriptions)
         
@@ -73,12 +76,28 @@ final class CameraModel: ObservableObject {
     func switchFlash() {
         service.flashMode = service.flashMode == .on ? .off : .on
     }
+    
+    func deletePhoto(_ photo: Photo) {
+        Task { @MainActor in
+            guard let index = photos.firstIndex(of: photo) else {
+                return
+            }
+            var current = photos
+            current.remove(at: index)
+            photos = current
+        }
+    }
 }
 
+
 struct CameraView: View {
-    @StateObject var model = CameraModel()
+    @State var model = CameraModel()
     
-    @State var currentZoomFactor: CGFloat = 1.0
+    init(saveToPhotoLibrary: Bool = true) {
+        self._model = State(initialValue: CameraModel(saveToPhotoLibrary: saveToPhotoLibrary))
+    }
+    
+    @State private var currentZoomFactor: CGFloat = 1.0
     
     var captureButton: some View {
         Button(action: {
@@ -96,14 +115,23 @@ struct CameraView: View {
     }
     
     var capturedPhotoThumbnail: some View {
-        Group {
-            if model.photo != nil {
-                Image(uiImage: model.photo.image!)
+        let lastPhoto = model.photos.last
+        let photoCount = model.photos.count
+        
+        return Group {
+            if lastPhoto != nil {
+                Image(uiImage: lastPhoto!.image!)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 60, height: 60)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .animation(.spring())
+                    // TODO
+                    // add a badge with a photo count
+                    .onTapGesture {
+                        print("photos tapped")
+                            // when pressed, should show all the photos in a grid and can delete individual ones
+                    }
                 
             } else {
                 RoundedRectangle(cornerRadius: 10)
@@ -127,79 +155,75 @@ struct CameraView: View {
     }
     
     var body: some View {
-        NavigationView {
-            GeometryReader { reader in
-                ZStack {
-                    Color.black.edgesIgnoringSafeArea(.all)
+        GeometryReader { reader in
+            ZStack {
+                Color.black.edgesIgnoringSafeArea(.all)
+                
+                VStack {
+                    Button(action: {
+                        model.switchFlash()
+                    }, label: {
+                        Image(systemName: model.isFlashOn ? "bolt.fill" : "bolt.slash.fill")
+                            .font(.system(size: 20, weight: .medium, design: .default))
+                    })
+                    .accentColor(model.isFlashOn ? .yellow : .white)
                     
-                    VStack {
-                        Button(action: {
-                            model.switchFlash()
-                        }, label: {
-                            Image(systemName: model.isFlashOn ? "bolt.fill" : "bolt.slash.fill")
-                                .font(.system(size: 20, weight: .medium, design: .default))
-                        })
-                        .accentColor(model.isFlashOn ? .yellow : .white)
-                        
-                        CameraPreview(session: model.session)
-                            .gesture(
-                                DragGesture().onChanged({ (val) in
+                    CameraPreview(session: model.session)
+                        .gesture(
+                            DragGesture().onChanged({ (val) in
                                     //  Only accept vertical drag
-                                    if abs(val.translation.height) > abs(val.translation.width) {
+                                if abs(val.translation.height) > abs(val.translation.width) {
                                         //  Get the percentage of vertical screen space covered by drag
-                                        let percentage: CGFloat = -(val.translation.height / reader.size.height)
+                                    let percentage: CGFloat = -(val.translation.height / reader.size.height)
                                         //  Calculate new zoom factor
-                                        let calc = currentZoomFactor + percentage
+                                    let calc = currentZoomFactor + percentage
                                         //  Limit zoom factor to a maximum of 5x and a minimum of 1x
-                                        let zoomFactor: CGFloat = min(max(calc, 1), 5)
+                                    let zoomFactor: CGFloat = min(max(calc, 1), 5)
                                         //  Store the newly calculated zoom factor
-                                        currentZoomFactor = zoomFactor
+                                    currentZoomFactor = zoomFactor
                                         //  Sets the zoom factor to the capture device session
-                                        model.zoom(with: zoomFactor)
-                                    }
-                                })
-                            )
-                            .onAppear {
-                                model.configure()
-                            }
-                            .alert(isPresented: $model.showAlertError, content: {
-                                Alert(title: Text(model.alertError.title), message: Text(model.alertError.message), dismissButton: .default(Text(model.alertError.primaryButtonTitle), action: {
-                                    model.alertError.primaryAction?()
-                                }))
-                            })
-                            .overlay(
-                                Group {
-                                    if model.willCapturePhoto {
-                                        Color.black
-                                    }
+                                    model.zoom(with: zoomFactor)
                                 }
-                            )
-                            .animation(.easeInOut)
-                        
-                        
-                        HStack {
-                            NavigationLink(destination: Text("Detail photo")) {
-                                capturedPhotoThumbnail
-                            }
-                            
-                            Spacer()
-                            
-                            captureButton
-                            
-                            Spacer()
-                            
-                            flipCameraButton
-                            
+                            })
+                        )
+                        .onAppear {
+                            model.configure()
                         }
-                        .padding(.horizontal, 20)
+                        .alert(isPresented: $model.showAlertError, content: {
+                            Alert(title: Text(model.alertError.title), message: Text(model.alertError.message), dismissButton: .default(Text(model.alertError.primaryButtonTitle), action: {
+                                model.alertError.primaryAction?()
+                            }))
+                        })
+                        .overlay(
+                            Group {
+                                if model.willCapturePhoto {
+                                    Color.black
+                                }
+                            }
+                        )
+                        .animation(.easeInOut)
+                    
+                    
+                    HStack {
+                        capturedPhotoThumbnail
+                        
+                        Spacer()
+                        
+                        captureButton
+                        
+                        Spacer()
+                        
+                        flipCameraButton
+                        
                     }
+                    .padding(.horizontal, 20)
                 }
             }
         }
     }
 }
 
-struct ContentView_Previews: PreviewProvider {
+struct CameraView_Previews: PreviewProvider {
     static var previews: some View {
         CameraView()
     }
